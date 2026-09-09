@@ -1,0 +1,6 @@
+{
+  "name": "MS Fitness Gym Admin Panel",
+  "description": "Admin-only gym management system for MS Fitness featuring member management, membership plans, fee payments, automated receipts, expiry tracking, reports, and activity logs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
