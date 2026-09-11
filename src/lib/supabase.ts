@@ -5,6 +5,18 @@ export const DEFAULT_SUPABASE_PROJECT_ID = 'zjruoaaxlpxjeejzvmpt';
 export const DEFAULT_SUPABASE_URL = 'https://zjruoaaxlpxjeejzvmpt.supabase.co';
 export const DEFAULT_SUPABASE_ANON_KEY = 'sb_publishable_a2m8MA8kVYy2djTw-J_lGQ_5whXLpXp';
 export const SUPABASE_DASHBOARD_SQL_URL = `https://supabase.com/dashboard/project/${DEFAULT_SUPABASE_PROJECT_ID}/sql/new`;
+export const SUPABASE_EMAIL_TEMPLATES_DASHBOARD_URL = `https://supabase.com/dashboard/project/${DEFAULT_SUPABASE_PROJECT_ID}/auth/templates`;
+
+// Supabase Email OTP Template (replaces default Magic Link with real 6-digit OTP)
+export const SUPABASE_OTP_EMAIL_SUBJECT = 'MS Fitness - Admin Verification Code';
+
+export const SUPABASE_OTP_EMAIL_BODY = `<h2>MS FITNESS</h2>
+<p><strong>Admin Verification Code</strong></p>
+<p>Your one-time verification code is:</p>
+<h1 style="font-size: 36px; letter-spacing: 6px; color: #dc2626; font-family: monospace; margin: 16px 0;">{{ .Token }}</h1>
+<p>This code expires shortly.</p>
+<p>Enter this code in the MS Fitness Admin Panel to continue.</p>
+<p style="color: #71717a; font-size: 12px; margin-top: 24px;">If you did not request this code, you can safely ignore this email.</p>`;
 
 // Environment variables or localStorage override
 const STORAGE_URL_KEY = 'ms_fitness_supabase_url';
@@ -296,10 +308,12 @@ CREATE TABLE IF NOT EXISTS public.admins (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Seed initial Super Admin if admins table is empty
+-- Seed initial Super Admin (singhalmanav58@gmail.com) and ensure admin@msfitness.com is blocked
 INSERT INTO public.admins (admin_id, email, full_name, role, status, permissions)
-SELECT 'ADM-0001', 'admin@msfitness.com', 'MS Fitness Super Admin', 'super_admin', 'active', '["*"]'::jsonb
-WHERE NOT EXISTS (SELECT 1 FROM public.admins LIMIT 1);
+SELECT 'ADM-0001', 'singhalmanav58@gmail.com', 'Manav Singhal', 'super_admin', 'active', '["*"]'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM public.admins WHERE email = 'singhalmanav58@gmail.com');
+
+UPDATE public.admins SET status = 'inactive', role = 'admin', permissions = '[]'::jsonb WHERE lower(email) = 'admin@msfitness.com';
 
 -- 8. Indexes for ultra fast queries
 CREATE INDEX IF NOT EXISTS idx_members_member_id ON public.members(member_id);
@@ -440,10 +454,12 @@ CREATE TABLE IF NOT EXISTS public.admins (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Seed initial Super Admin if admins table is empty
+-- Seed initial Super Admin (singhalmanav58@gmail.com) and ensure admin@msfitness.com is blocked
 INSERT INTO public.admins (admin_id, email, full_name, role, status, permissions)
-SELECT 'ADM-0001', 'admin@msfitness.com', 'MS Fitness Super Admin', 'super_admin', 'active', '["*"]'::jsonb
-WHERE NOT EXISTS (SELECT 1 FROM public.admins LIMIT 1);
+SELECT 'ADM-0001', 'singhalmanav58@gmail.com', 'Manav Singhal', 'super_admin', 'active', '["*"]'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM public.admins WHERE email = 'singhalmanav58@gmail.com');
+
+UPDATE public.admins SET status = 'inactive', role = 'admin', permissions = '[]'::jsonb WHERE lower(email) = 'admin@msfitness.com';
 
 -- Enhance activity_logs table
 ALTER TABLE public.activity_logs ADD COLUMN IF NOT EXISTS admin_id TEXT;

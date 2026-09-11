@@ -1,5 +1,6 @@
 import { getSupabase, isSupabaseConfigured } from './supabase';
 import { extractUpiTransactionNumber } from './planUtils';
+import { calculatePaymentBreakdown, roundTwoDecimals, PaymentStatus } from './paymentCalculations';
 import {
   Member,
   MembershipPlan,
@@ -194,19 +195,19 @@ export async function logActivity(
     ip_address?: string;
   }
 ) {
-  let email = 'admin@msfitness.com';
+  let email = 'singhalmanav58@gmail.com';
   let adminId = '';
-  let adminName = '';
-  let role = 'admin';
+  let adminName = 'Manav Singhal';
+  let role = 'super_admin';
 
   if (typeof admin === 'string') {
     email = admin.trim();
     adminName = email.split('@')[0];
   } else if (admin && typeof admin === 'object') {
-    email = admin.email || 'admin@msfitness.com';
+    email = admin.email || 'singhalmanav58@gmail.com';
     adminId = admin.admin_id || '';
     adminName = admin.full_name || email.split('@')[0];
-    role = admin.role || 'admin';
+    role = admin.role || 'super_admin';
   }
 
   // Derive module if not explicitly provided
@@ -345,12 +346,64 @@ export async function fetchMembers(): Promise<Member[]> {
       const match = m.notes.match(/\[PLAN_ID:([a-zA-Z0-9_-]+)\]/);
       if (match) planId = match[1];
     }
+    const rawBalance = Number(m.remaining_balance) || 0;
+    const remaining_balance = Math.max(0, rawBalance);
+    const overpaid_balance = rawBalance < 0 ? Math.abs(rawBalance) : Math.max(0, Number(m.overpaid_balance) || 0);
+
     return {
       ...m,
       plan_id: planId,
+      remaining_balance,
+      overpaid_balance,
     };
   }) as Member[];
   return mapped;
+}
+
+export async function fetchMemberByEmail(email: string): Promise<Member | null> {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (!cleanEmail) return null;
+
+  const client = getSupabase();
+  if (client && isSupabaseConfigured()) {
+    try {
+      const { data, error } = await client
+        .from('members')
+        .select('*')
+        .ilike('email', cleanEmail)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (!error && data && data.length > 0) {
+        const m = data[0];
+        let planId = m.plan_id;
+        if (!planId && m.notes) {
+          const match = m.notes.match(/\[PLAN_ID:([a-zA-Z0-9_-]+)\]/);
+          if (match) planId = match[1];
+        }
+        const rawBalance = Number(m.remaining_balance) || 0;
+        const remaining_balance = Math.max(0, rawBalance);
+        const overpaid_balance = rawBalance < 0 ? Math.abs(rawBalance) : Math.max(0, Number(m.overpaid_balance) || 0);
+
+        return {
+          ...m,
+          plan_id: planId,
+          remaining_balance,
+          overpaid_balance,
+        } as Member;
+      }
+    } catch (err) {
+      console.warn('Supabase fetchMemberByEmail error:', err);
+    }
+  }
+
+  // Fallback check against cached/stored members list
+  try {
+    const all = await fetchMembers();
+    return all.find((m) => m.email && m.email.trim().toLowerCase() === cleanEmail) || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function generateNextMemberId(): Promise<string> {
@@ -849,13 +902,13 @@ export async function getMemberLatestBalance(memberId: string): Promise<number> 
     try {
       const { data } = await client
         .from('payments')
-        .select('remaining_balance, created_at')
+        .select('remaining_balance, overpaid_amount, created_at')
         .eq('member_id', memberId)
         .order('created_at', { ascending: false })
         .limit(1);
 
       if (data && data.length > 0) {
-        return Number(data[0].remaining_balance) || 0;
+        return Math.max(0, Number(data[0].remaining_balance) || 0);
       }
 
       // Check member's remaining_balance column
@@ -866,7 +919,7 @@ export async function getMemberLatestBalance(memberId: string): Promise<number> 
         .single();
 
       if (mem && mem.remaining_balance !== undefined) {
-        return Number(mem.remaining_balance) || 0;
+        return Math.max(0, Number(mem.remaining_balance) || 0);
       }
     } catch (e) {
       console.warn('Could not fetch last balance from payments table:', e);
@@ -875,14 +928,58 @@ export async function getMemberLatestBalance(memberId: string): Promise<number> 
   return 0;
 }
 
+export async function getMemberLatestLedger(memberId: string): Promise<{ remainingBalance: number; overpaidAmount: number; status: PaymentStatus }> {
+  const client = getSupabase();
+  if (client && isSupabaseConfigured() && isValidUuid(memberId)) {
+    try {
+      const { data } = await client
+        .from('payments')
+        .select('remaining_balance, overpaid_amount, payment_status, created_at')
+        .eq('member_id', memberId)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (data && data.length > 0) {
+        const row = data[0];
+        const rawRem = Number(row.remaining_balance) || 0;
+        const remainingBalance = Math.max(0, rawRem);
+        const overpaidAmount = rawRem < 0 ? Math.abs(rawRem) : Math.max(0, Number(row.overpaid_amount) || 0);
+        const status = (row.payment_status as PaymentStatus) || (overpaidAmount > 0 ? 'Overpaid' : remainingBalance > 0 ? 'Partial' : 'Paid');
+        return { remainingBalance, overpaidAmount, status };
+      }
+
+      const { data: mem } = await client
+        .from('members')
+        .select('remaining_balance, overpaid_balance, payment_status')
+        .eq('id', memberId)
+        .single();
+
+      if (mem) {
+        const rawRem = Number(mem.remaining_balance) || 0;
+        const remainingBalance = Math.max(0, rawRem);
+        const overpaidAmount = rawRem < 0 ? Math.abs(rawRem) : Math.max(0, Number(mem.overpaid_balance) || 0);
+        const status = (mem.payment_status as PaymentStatus) || (overpaidAmount > 0 ? 'Overpaid' : remainingBalance > 0 ? 'Pending' : 'Paid');
+        return { remainingBalance, overpaidAmount, status };
+      }
+    } catch (e) {
+      console.warn('Could not fetch last ledger from payments table:', e);
+    }
+  }
+  return { remainingBalance: 0, overpaidAmount: 0, status: 'Paid' };
+}
+
 export async function createPayment(
   paymentData: {
     member_id: string;
+    original_plan_amount?: number;
+    final_payable?: number;
     amount: number;
     discount: number;
-    previous_balance: number;
-    total_due: number;
-    remaining_balance: number;
+    previous_balance?: number;
+    total_due?: number;
+    remaining_balance?: number;
+    overpaid_amount?: number;
+    payment_status?: PaymentStatus;
     payment_method: 'Cash' | 'UPI';
     transaction_number?: string;
     upi_transaction_number?: string;
@@ -908,6 +1005,62 @@ export async function createPayment(
   const { paymentId, receiptNumber } = generatePaymentAndReceiptIds();
   const now = new Date().toISOString();
 
+  // 1. Fetch current database state for this member as source of truth
+  let dbPreviousPending = 0;
+  let dbPlanAmount = 0;
+  let dbDiscount = 0;
+
+  try {
+    const { data: lastPayments } = await client
+      .from('payments')
+      .select('remaining_balance, overpaid_amount, created_at')
+      .eq('member_id', paymentData.member_id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (lastPayments && lastPayments.length > 0) {
+      dbPreviousPending = Math.max(0, Number(lastPayments[0].remaining_balance) || 0);
+    } else {
+      const { data: memRecord } = await client
+        .from('members')
+        .select('remaining_balance, plan_amount, discount')
+        .eq('id', paymentData.member_id)
+        .single();
+
+      if (memRecord) {
+        dbPreviousPending = Math.max(0, Number(memRecord.remaining_balance) || 0);
+        dbPlanAmount = Number(memRecord.plan_amount) || 0;
+        dbDiscount = Number(memRecord.discount) || 0;
+      }
+    }
+  } catch (err) {
+    console.warn('Could not query database balance in createPayment, using fallback:', err);
+  }
+
+  // Determine calculation inputs with database values as source of truth
+  const originalPlanAmount =
+    paymentData.original_plan_amount !== undefined
+      ? Number(paymentData.original_plan_amount)
+      : (dbPlanAmount || (paymentData.total_due ? Number(paymentData.total_due) : 0));
+
+  const discount = Number(paymentData.discount) || 0;
+  
+  // Previous pending: use explicitly passed if provided, otherwise db source of truth
+  const previousPendingBalance =
+    paymentData.previous_balance !== undefined
+      ? Number(paymentData.previous_balance)
+      : dbPreviousPending;
+
+  const currentPayment = Number(paymentData.amount) || 0;
+
+  // Execute canonical 100% calculation
+  const breakdown = calculatePaymentBreakdown({
+    originalPlanAmount,
+    discount,
+    previousPendingBalance,
+    currentPayment,
+  });
+
   const isUpi = paymentData.payment_method === 'UPI';
   const rawTxn = paymentData.upi_transaction_number || paymentData.transaction_number;
   const cleanTxn = isUpi && rawTxn ? rawTxn.trim() : undefined;
@@ -924,11 +1077,15 @@ export async function createPayment(
     payment_id: paymentId,
     receipt_number: receiptNumber,
     member_id: paymentData.member_id,
-    amount: Number(paymentData.amount) || 0,
-    discount: Number(paymentData.discount) || 0,
-    previous_balance: Number(paymentData.previous_balance) || 0,
-    total_due: Number(paymentData.total_due) || 0,
-    remaining_balance: Number(paymentData.remaining_balance) || 0,
+    original_plan_amount: breakdown.originalPlanAmount,
+    final_payable: breakdown.finalPayableAmount,
+    amount: breakdown.currentPayment,
+    discount: breakdown.discount,
+    previous_balance: breakdown.previousPendingBalance,
+    total_due: breakdown.totalOutstandingAmount,
+    remaining_balance: breakdown.remainingPendingAmount,
+    overpaid_amount: breakdown.overpaidAmount,
+    payment_status: breakdown.status,
     payment_method: paymentData.payment_method || 'Cash',
     payment_date: paymentData.payment_date || now.slice(0, 10),
     notes: notesVal,
@@ -984,10 +1141,12 @@ export async function createPayment(
 
   const data = paymentResult;
 
-  // Synchronize member's remaining balance and membership expiry directly in Supabase
+  // Synchronize member's remaining balance, overpaid credit, and expiry directly in Supabase
   try {
     const memUpdate: Record<string, any> = {
-      remaining_balance: Number(paymentData.remaining_balance) || 0,
+      remaining_balance: breakdown.remainingPendingAmount,
+      overpaid_balance: breakdown.overpaidAmount,
+      payment_status: breakdown.status,
       updated_at: now,
     };
 
@@ -1007,19 +1166,42 @@ export async function createPayment(
       }
     }
 
-    await client.from('members').update(memUpdate).eq('id', paymentData.member_id);
+    let memUpdateAttempt = { ...memUpdate };
+    for (let i = 0; i < 4; i++) {
+      const { error: memErr } = await client
+        .from('members')
+        .update(memUpdateAttempt)
+        .eq('id', paymentData.member_id);
+
+      if (!memErr) break;
+      const missingCol = extractMissingColumn(memErr);
+      if (missingCol && Object.prototype.hasOwnProperty.call(memUpdateAttempt, missingCol)) {
+        delete memUpdateAttempt[missingCol];
+        continue;
+      }
+      break;
+    }
   } catch (syncErr) {
     console.warn('Member balance update notice:', syncErr);
   }
 
   await logActivity(
     'Payment Recorded',
-    `Payment of ₹${paymentData.amount} received (${paymentData.payment_method}${cleanTxn ? ` - Txn: ${cleanTxn}` : ''}) - ID: ${paymentId}`,
+    `Payment of ₹${breakdown.currentPayment} received (${paymentData.payment_method}${cleanTxn ? ` - Txn: ${cleanTxn}` : ''}) [Plan: ₹${breakdown.originalPlanAmount}, Due: ₹${breakdown.totalOutstandingAmount}, Remaining: ₹${breakdown.remainingPendingAmount}, Overpaid: ₹${breakdown.overpaidAmount}] - ID: ${paymentId}`,
     adminEmail
   );
 
   const createdPayment: Payment = {
     ...(data as Payment),
+    original_plan_amount: breakdown.originalPlanAmount,
+    final_payable: breakdown.finalPayableAmount,
+    amount: breakdown.currentPayment,
+    discount: breakdown.discount,
+    previous_balance: breakdown.previousPendingBalance,
+    total_due: breakdown.totalOutstandingAmount,
+    remaining_balance: breakdown.remainingPendingAmount,
+    overpaid_amount: breakdown.overpaidAmount,
+    payment_status: breakdown.status,
     transaction_number: cleanTxn || data.transaction_number || extractUpiTransactionNumber(notesVal),
     member_name: data.members?.name || 'Member',
     member_code: data.members?.member_id || '',
@@ -1276,14 +1458,54 @@ export function computeDashboardStats(members: Member[] = [], payments: Payment[
     }
   });
 
-  const memberBalances: Record<string, number> = {};
-  safePayments.forEach((p) => {
-    if (p && p.member_id && memberBalances[p.member_id] === undefined) {
-      memberBalances[p.member_id] = Number(p.remaining_balance) || 0;
+  // Calculate true outstanding dues and total overpaid/advance credits per member
+  const sortedPayments = [...safePayments].sort((a, b) => {
+    const timeA = new Date(a.payment_date || a.created_at || '').getTime();
+    const timeB = new Date(b.payment_date || b.created_at || '').getTime();
+    return timeB - timeA;
+  });
+
+  const latestPaymentByMember: Record<string, Payment> = {};
+  sortedPayments.forEach((p) => {
+    if (p && p.member_id && !latestPaymentByMember[p.member_id]) {
+      latestPaymentByMember[p.member_id] = p;
     }
   });
 
-  const totalOutstandingBalance = Object.values(memberBalances).reduce((sum, val) => sum + val, 0);
+  let totalOutstandingBalance = 0;
+  let totalOverpaidCredit = 0;
+
+  safeMembers.forEach((m) => {
+    if (!m) return;
+    const latest = latestPaymentByMember[m.id];
+    let memberPending = 0;
+    let memberOverpaid = 0;
+
+    if (latest) {
+      const rawRem = Number(latest.remaining_balance) || 0;
+      if (rawRem < 0) {
+        memberPending = 0;
+        memberOverpaid = Math.abs(rawRem);
+      } else {
+        memberPending = rawRem;
+        if (latest.overpaid_amount !== undefined && latest.overpaid_amount !== null) {
+          memberOverpaid = Math.max(0, Number(latest.overpaid_amount));
+        }
+      }
+    } else {
+      const rawRem = Number(m.remaining_balance) || 0;
+      if (rawRem < 0) {
+        memberPending = 0;
+        memberOverpaid = Math.abs(rawRem);
+      } else {
+        memberPending = rawRem;
+        memberOverpaid = Math.max(0, Number(m.overpaid_balance || 0));
+      }
+    }
+
+    totalOutstandingBalance += memberPending;
+    totalOverpaidCredit += memberOverpaid;
+  });
 
   return {
     totalMembers: safeMembers.length,
@@ -1291,9 +1513,10 @@ export function computeDashboardStats(members: Member[] = [], payments: Payment[
     expiredMembers: expiredCount,
     expiringSoon: expiringSoonCount,
     totalPaymentsCount: safePayments.length,
-    todayCollection,
-    thisMonthCollection,
-    totalOutstandingBalance,
+    todayCollection: roundTwoDecimals(todayCollection),
+    thisMonthCollection: roundTwoDecimals(thisMonthCollection),
+    totalOutstandingBalance: roundTwoDecimals(totalOutstandingBalance),
+    totalOverpaidCredit: roundTwoDecimals(totalOverpaidCredit),
   };
 }
 

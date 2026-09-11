@@ -387,7 +387,7 @@ export const ReceiptModal: React.FC<Props> = ({
           {/* Footer signature line */}
           <div className="pt-4 border-t border-neutral-800 flex items-end justify-between text-[11px] text-neutral-400">
             <div>
-              <p>Admin: {adminEmail || 'admin@msfitness.com'}</p>
+              <p>Admin: {adminEmail || 'singhalmanav58@gmail.com'}</p>
               <p className="text-[10px] text-neutral-500 mt-0.5">MS Fitness Management Software</p>
             </div>
             <div className="text-right">

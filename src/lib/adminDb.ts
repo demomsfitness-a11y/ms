@@ -14,11 +14,11 @@ export const DEFAULT_INITIAL_ADMINS: Omit<AdminAccount, 'id'>[] = [
   },
   {
     admin_id: 'ADM-0002',
-    full_name: 'MS Fitness Super Admin',
+    full_name: 'MS Fitness Admin (Blocked)',
     email: 'admin@msfitness.com',
-    role: 'super_admin',
-    status: 'active',
-    permissions: ALL_PERMISSIONS.map((p) => p.key),
+    role: 'admin',
+    status: 'inactive', // Permanently blocked
+    permissions: [],
     created_at: '2025-01-01T00:00:00.000Z',
   },
 ];
@@ -31,7 +31,52 @@ function getStoredLocalAdmins(): AdminAccount[] {
     const raw = localStorage.getItem(LOCAL_ADMINS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        let changed = false;
+        let hasManav = false;
+
+        const sanitized = parsed.map((a: AdminAccount) => {
+          if (a.email.toLowerCase() === 'admin@msfitness.com') {
+            changed = true;
+            return {
+              ...a,
+              full_name: 'MS Fitness Admin (Blocked)',
+              role: 'admin' as AdminRole,
+              status: 'inactive' as AdminStatus,
+              permissions: [],
+            };
+          }
+          if (a.email.toLowerCase() === 'singhalmanav58@gmail.com') {
+            hasManav = true;
+            return {
+              ...a,
+              role: 'super_admin' as AdminRole,
+              status: 'active' as AdminStatus,
+              permissions: ALL_PERMISSIONS.map((p) => p.key),
+            };
+          }
+          return a;
+        });
+
+        if (!hasManav) {
+          sanitized.unshift({
+            id: 'admin-local-1',
+            admin_id: 'ADM-0001',
+            full_name: 'Manav Singhal',
+            email: 'singhalmanav58@gmail.com',
+            role: 'super_admin',
+            status: 'active',
+            permissions: ALL_PERMISSIONS.map((p) => p.key),
+            created_at: '2025-01-01T00:00:00.000Z',
+          });
+          changed = true;
+        }
+
+        if (changed) {
+          saveStoredLocalAdmins(sanitized);
+        }
+        return sanitized;
+      }
     }
   } catch (e) {
     console.warn('Error reading local admins:', e);
@@ -106,6 +151,53 @@ export async function fetchAdmins(): Promise<AdminAccount[]> {
             return formatAdminsData(seededData);
           }
         }
+
+        // Enforce: admin@msfitness.com must be inactive (blocked)
+        const msfRow = data.find((r: any) => (r.email || '').toLowerCase().trim() === 'admin@msfitness.com');
+        if (msfRow && msfRow.status !== 'inactive') {
+          msfRow.status = 'inactive';
+          msfRow.role = 'admin';
+          msfRow.permissions = [];
+          try {
+            await client.from('admins').update({ status: 'inactive', role: 'admin', permissions: [] }).ilike('email', 'admin@msfitness.com');
+          } catch (updateErr) {
+            console.warn('Could not deactivate admin@msfitness.com in Supabase:', updateErr);
+          }
+        }
+
+        // Enforce: singhalmanav58@gmail.com must be present and active super_admin
+        const manavRow = data.find((r: any) => (r.email || '').toLowerCase().trim() === 'singhalmanav58@gmail.com');
+        if (!manavRow) {
+          try {
+            const { data: inserted } = await client.from('admins').insert([{
+              admin_id: 'ADM-0001',
+              full_name: 'Manav Singhal',
+              email: 'singhalmanav58@gmail.com',
+              role: 'super_admin',
+              status: 'active',
+              permissions: ALL_PERMISSIONS.map((p) => p.key),
+            }]).select();
+            if (inserted && inserted.length > 0) {
+              data.unshift(inserted[0]);
+            }
+          } catch (seedErr) {
+            console.warn('Could not auto-seed singhalmanav58@gmail.com:', seedErr);
+          }
+        } else if (manavRow.role !== 'super_admin' || manavRow.status !== 'active') {
+          manavRow.role = 'super_admin';
+          manavRow.status = 'active';
+          manavRow.permissions = ALL_PERMISSIONS.map((p) => p.key);
+          try {
+            await client.from('admins').update({
+              role: 'super_admin',
+              status: 'active',
+              permissions: ALL_PERMISSIONS.map((p) => p.key),
+            }).ilike('email', 'singhalmanav58@gmail.com');
+          } catch (e) {
+            console.warn('Could not elevate singhalmanav58@gmail.com:', e);
+          }
+        }
+
         return formatAdminsData(data);
       }
 
@@ -164,6 +256,84 @@ export async function fetchAdminByEmail(email: string): Promise<AdminAccount | n
   const cleanEmail = email.toLowerCase().trim();
   const client = getSupabase();
 
+  // 1. Explicitly blocked account
+  if (cleanEmail === 'admin@msfitness.com') {
+    if (client && isSupabaseConfigured()) {
+      try {
+        await client.from('admins').update({ status: 'inactive', role: 'admin', permissions: [] }).ilike('email', 'admin@msfitness.com');
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      id: 'blocked-admin-msfitness',
+      admin_id: 'ADM-0002',
+      full_name: 'MS Fitness Admin (Blocked)',
+      email: 'admin@msfitness.com',
+      role: 'admin',
+      status: 'inactive',
+      permissions: [],
+      created_at: '2025-01-01T00:00:00.000Z',
+    };
+  }
+
+  // 2. Primary Super Administrator
+  if (cleanEmail === 'singhalmanav58@gmail.com') {
+    if (client && isSupabaseConfigured()) {
+      try {
+        const { data } = await client
+          .from('admins')
+          .select('*')
+          .ilike('email', cleanEmail)
+          .maybeSingle();
+
+        if (data) {
+          const formatted = formatAdminsData([data])[0];
+          if (formatted.role !== 'super_admin' || formatted.status !== 'active') {
+            formatted.role = 'super_admin';
+            formatted.status = 'active';
+            formatted.permissions = ALL_PERMISSIONS.map((p) => p.key);
+            await client.from('admins').update({
+              role: 'super_admin',
+              status: 'active',
+              permissions: ALL_PERMISSIONS.map((p) => p.key),
+            }).ilike('email', cleanEmail);
+          }
+          return formatted;
+        } else {
+          // Auto-insert if missing
+          const newSuper = {
+            admin_id: 'ADM-0001',
+            full_name: 'Manav Singhal',
+            email: 'singhalmanav58@gmail.com',
+            role: 'super_admin',
+            status: 'active',
+            permissions: ALL_PERMISSIONS.map((p) => p.key),
+          };
+          const { data: inserted } = await client.from('admins').insert([newSuper]).select().maybeSingle();
+          if (inserted) return formatAdminsData([inserted])[0];
+        }
+      } catch (err) {
+        console.warn('Notice querying singhalmanav58@gmail.com from Supabase:', err);
+      }
+    }
+
+    const localList = getStoredLocalAdmins();
+    const foundLocal = localList.find((a) => a.email.toLowerCase() === 'singhalmanav58@gmail.com');
+    if (foundLocal) return foundLocal;
+
+    return {
+      id: 'super-manav-singhal',
+      admin_id: 'ADM-0001',
+      full_name: 'Manav Singhal',
+      email: 'singhalmanav58@gmail.com',
+      role: 'super_admin',
+      status: 'active',
+      permissions: ALL_PERMISSIONS.map((p) => p.key),
+      created_at: new Date().toISOString(),
+    };
+  }
+
   if (client && isSupabaseConfigured()) {
     try {
       const { data, error } = await client
@@ -175,26 +345,6 @@ export async function fetchAdminByEmail(email: string): Promise<AdminAccount | n
       if (!error && data) {
         return formatAdminsData([data])[0];
       }
-
-      // If table doesn't exist or user is super admin default
-      if (
-        cleanEmail === 'singhalmanav58@gmail.com' ||
-        cleanEmail === 'admin@msfitness.com'
-      ) {
-        const foundLocal = getStoredLocalAdmins().find((a) => a.email.toLowerCase() === cleanEmail);
-        if (foundLocal) return foundLocal;
-
-        return {
-          id: `super-${Date.now()}`,
-          admin_id: 'ADM-0001',
-          full_name: cleanEmail.includes('singhal') ? 'Manav Singhal' : 'MS Fitness Super Admin',
-          email: cleanEmail,
-          role: 'super_admin',
-          status: 'active',
-          permissions: ALL_PERMISSIONS.map((p) => p.key),
-          created_at: new Date().toISOString(),
-        };
-      }
     } catch (err) {
       console.warn('Error fetching admin by email from Supabase:', err);
     }
@@ -204,20 +354,6 @@ export async function fetchAdminByEmail(email: string): Promise<AdminAccount | n
   const localList = getStoredLocalAdmins();
   const localMatch = localList.find((a) => a.email.toLowerCase() === cleanEmail);
   if (localMatch) return localMatch;
-
-  // If default super admin
-  if (cleanEmail === 'singhalmanav58@gmail.com' || cleanEmail === 'admin@msfitness.com') {
-    return {
-      id: 'admin-super-auto',
-      admin_id: 'ADM-0001',
-      full_name: cleanEmail.includes('singhal') ? 'Manav Singhal' : 'MS Fitness Super Admin',
-      email: cleanEmail,
-      role: 'super_admin',
-      status: 'active',
-      permissions: ALL_PERMISSIONS.map((p) => p.key),
-      created_at: new Date().toISOString(),
-    };
-  }
 
   return null;
 }

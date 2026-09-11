@@ -38,9 +38,9 @@ export const ReportsView: React.FC<Props> = ({ members, payments, settings, curr
     let csvContent = 'data:text/csv;charset=utf-8,';
 
     if (reportType === 'payment_history' || reportType === 'daily_collection' || reportType === 'monthly_collection') {
-      csvContent += 'Receipt No,Payment ID,Member Name,Member ID,Date,Amount Paid,Discount,Total Due,Remaining Balance,Method\n';
+      csvContent += 'Receipt No,Payment ID,Member Name,Member ID,Date,Original Plan,Discount,Final Payable,Amount Paid,Remaining Due,Overpaid Credit,Status,Method\n';
       filteredPayments.forEach((p) => {
-        csvContent += `"${p.receipt_number || ''}","${p.payment_id}","${p.member_name || ''}","${p.member_code || ''}","${p.payment_date}","${p.amount}","${p.discount}","${p.total_due}","${p.remaining_balance}","${p.payment_method}"\n`;
+        csvContent += `"${p.receipt_number || ''}","${p.payment_id}","${p.member_name || ''}","${p.member_code || ''}","${p.payment_date}","${p.original_plan_amount ?? p.total_due}","${p.discount || 0}","${p.final_payable ?? p.total_due}","${p.amount}","${p.remaining_balance}","${p.overpaid_amount || 0}","${p.payment_status || 'Paid'}","${p.payment_method}"\n`;
       });
     } else {
       csvContent += 'Member ID,Name,Mobile,Email,Join Date,Expiry Date,Status,Plan Amount\n';
@@ -71,13 +71,15 @@ export const ReportsView: React.FC<Props> = ({ members, payments, settings, curr
 
     if (reportType === 'daily_collection' || reportType === 'monthly_collection' || reportType === 'payment_history') {
       title = reportType === 'daily_collection' ? 'Daily Collections Report' : reportType === 'monthly_collection' ? 'Monthly Collections Report' : 'Payment History Ledger';
-      headers = ['Receipt', 'Member', 'Date', 'Amount', 'Balance Due', 'Method'];
+      headers = ['Receipt', 'Member', 'Date', 'Amount Paid', 'Remaining Due', 'Overpaid Credit', 'Status', 'Method'];
       rows = filteredPayments.map((p) => [
         p.receipt_number || p.payment_id,
         p.member_name || 'Member',
         p.payment_date,
         `INR ${Number(p.amount).toLocaleString('en-IN')}`,
         `INR ${Number(p.remaining_balance).toLocaleString('en-IN')}`,
+        Number(p.overpaid_amount || 0) > 0 ? `INR ${Number(p.overpaid_amount).toLocaleString('en-IN')}` : '-',
+        p.payment_status || (Number(p.remaining_balance) === 0 ? 'Paid' : 'Partial'),
         p.payment_method,
       ]);
     } else {
@@ -101,6 +103,7 @@ export const ReportsView: React.FC<Props> = ({ members, payments, settings, curr
   // Report Summary Statistics
   const totalCollectedInRange = filteredPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
   const totalRemainingInRange = filteredPayments.reduce((sum, p) => sum + (Number(p.remaining_balance) || 0), 0);
+  const totalOverpaidInRange = filteredPayments.reduce((sum, p) => sum + (Number(p.overpaid_amount) || 0), 0);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
@@ -189,14 +192,18 @@ export const ReportsView: React.FC<Props> = ({ members, payments, settings, curr
             />
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="bg-neutral-950 px-3 py-1.5 rounded-xl border border-neutral-800">
-              <span className="text-neutral-400">Total in Period: </span>
+              <span className="text-neutral-400">Total Collected: </span>
               <strong className="text-emerald-400 font-display text-sm">₹{totalCollectedInRange.toLocaleString('en-IN')}</strong>
             </div>
             <div className="bg-neutral-950 px-3 py-1.5 rounded-xl border border-neutral-800">
               <span className="text-neutral-400">Pending Dues: </span>
               <strong className="text-red-400 font-display text-sm">₹{totalRemainingInRange.toLocaleString('en-IN')}</strong>
+            </div>
+            <div className="bg-neutral-950 px-3 py-1.5 rounded-xl border border-neutral-800">
+              <span className="text-neutral-400">Advance Credit: </span>
+              <strong className="text-blue-400 font-display text-sm">₹{totalOverpaidInRange.toLocaleString('en-IN')}</strong>
             </div>
           </div>
         </div>
@@ -216,37 +223,71 @@ export const ReportsView: React.FC<Props> = ({ members, payments, settings, curr
                   <th className="py-3.5 px-4">Mode</th>
                   <th className="py-3.5 px-4">Fee Paid</th>
                   <th className="py-3.5 px-4">Remaining Due</th>
+                  <th className="py-3.5 px-4">Overpaid Credit</th>
+                  <th className="py-3.5 px-4">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-800/80 text-neutral-200">
                 {filteredPayments.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="py-12 text-center text-neutral-500">
+                    <td colSpan={9} className="py-12 text-center text-neutral-500">
                       No transactions recorded in the selected date range.
                     </td>
                   </tr>
                 ) : (
-                  filteredPayments.map((p) => (
-                    <tr key={p.id} className="hover:bg-neutral-800/40">
-                      <td className="py-3.5 px-4 font-mono font-bold text-red-400">
-                        {p.receipt_number || 'N/A'}
-                      </td>
-                      <td className="py-3.5 px-4 font-mono text-neutral-400">{p.payment_id}</td>
-                      <td className="py-3.5 px-4 font-semibold text-white">{p.member_name || 'Member'}</td>
-                      <td className="py-3.5 px-4 text-neutral-300">{p.payment_date}</td>
-                      <td className="py-3.5 px-4">
-                        <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold">
-                          {p.payment_method}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 font-bold text-emerald-400">
-                        ₹{Number(p.amount).toLocaleString('en-IN')}
-                      </td>
-                      <td className="py-3.5 px-4 font-semibold text-red-400">
-                        ₹{Number(p.remaining_balance).toLocaleString('en-IN')}
-                      </td>
-                    </tr>
-                  ))
+                  filteredPayments.map((p) => {
+                    const overpaid = Number(p.overpaid_amount || 0);
+                    const remDue = Number(p.remaining_balance || 0);
+                    const status = p.payment_status || (remDue === 0 ? (overpaid > 0 ? 'Overpaid' : 'Paid') : (Number(p.amount) > 0 ? 'Partial' : 'Pending'));
+
+                    return (
+                      <tr key={p.id} className="hover:bg-neutral-800/40">
+                        <td className="py-3.5 px-4 font-mono font-bold text-red-400">
+                          {p.receipt_number || 'N/A'}
+                        </td>
+                        <td className="py-3.5 px-4 font-mono text-neutral-400">{p.payment_id}</td>
+                        <td className="py-3.5 px-4 font-semibold text-white">{p.member_name || 'Member'}</td>
+                        <td className="py-3.5 px-4 text-neutral-300">{p.payment_date}</td>
+                        <td className="py-3.5 px-4">
+                          <span className="px-2 py-0.5 rounded bg-neutral-800 text-[10px] font-bold">
+                            {p.payment_method}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 font-bold text-emerald-400 font-mono">
+                          ₹{Number(p.amount).toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3.5 px-4 font-semibold font-mono">
+                          <span className={remDue > 0 ? 'text-red-400' : 'text-emerald-400'}>
+                            ₹{remDue.toLocaleString('en-IN')}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 font-semibold font-mono">
+                          {overpaid > 0 ? (
+                            <span className="text-emerald-400 font-bold bg-emerald-950/50 px-2 py-0.5 rounded border border-emerald-800/40">
+                              +₹{overpaid.toLocaleString('en-IN')}
+                            </span>
+                          ) : (
+                            <span className="text-neutral-500">₹0</span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                              status === 'Paid'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/50'
+                                : status === 'Overpaid'
+                                ? 'bg-blue-950 text-blue-300 border border-blue-800/50'
+                                : status === 'Partial'
+                                ? 'bg-amber-950 text-amber-300 border border-amber-800/50'
+                                : 'bg-red-950 text-red-300 border border-red-800/50'
+                            }`}
+                          >
+                            {status}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>

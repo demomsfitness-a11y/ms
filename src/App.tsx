@@ -36,6 +36,7 @@ import {
   updateAdmin,
   deleteAdmin,
   fetchAdminByEmail,
+  fetchMemberByEmail,
 } from './lib/db';
 import { hasPermission, isSuperAdmin } from './lib/permissions';
 import { supabase, isSupabaseConfigured, DEFAULT_SUPABASE_PROJECT_ID } from './lib/supabase';
@@ -60,14 +61,29 @@ import { MemberProfileModal } from './components/MemberProfileModal';
 import { RefreshCw, AlertTriangle, Database, ShieldAlert, Lock } from 'lucide-react';
 
 export default function App() {
-  // Session & Auth state
+  // Session & Auth state (Strict Admin-Only Portal)
   const [adminEmail, setAdminEmail] = useState<string | null>(() => {
-    return localStorage.getItem('msf_admin_email') || null;
+    const saved = localStorage.getItem('msf_admin_email');
+    if (saved && saved.toLowerCase() === 'admin@msfitness.com') {
+      localStorage.removeItem('msf_admin_email');
+      localStorage.removeItem('msf_current_admin');
+      localStorage.removeItem('ms_fitness_admin_session');
+      return null;
+    }
+    return saved || null;
   });
   const [currentAdmin, setCurrentAdmin] = useState<AdminAccount | null>(() => {
     try {
       const cached = localStorage.getItem('msf_current_admin');
-      return cached ? JSON.parse(cached) : null;
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.email && parsed.email.toLowerCase() === 'admin@msfitness.com') {
+          localStorage.removeItem('msf_current_admin');
+          return null;
+        }
+        return parsed;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -131,26 +147,37 @@ export default function App() {
     }
   };
 
-  // Check Supabase Auth session on mount
+  // Check Supabase Auth session on mount (Strict Admin-Only Authorization)
   useEffect(() => {
     async function checkAuth() {
       try {
         if (supabase) {
           const { data } = await supabase.auth.getSession();
-          if (data?.session?.user?.email) {
-            const email = data.session.user.email;
+          const email = data?.session?.user?.email?.toLowerCase();
+          if (email) {
+            if (email === 'admin@msfitness.com') {
+              alert('Access Denied: The account "admin@msfitness.com" has been permanently blocked by the Super Administrator.');
+              await handleLogout();
+              return;
+            }
+
+            // Check if authorized in Admin/Staff table
+            const verified = await fetchAdminByEmail(email);
+            if (!verified || verified.status === 'inactive') {
+              console.warn(`User ${email} authenticated in Supabase but not authorized in admins table.`);
+              await supabase.auth.signOut();
+              await handleLogout();
+              return;
+            }
+
+            setCurrentAdmin(verified);
             setAdminEmail(email);
             localStorage.setItem('msf_admin_email', email);
-            const verified = await fetchAdminByEmail(email);
-            if (verified) {
-              if (verified.status === 'inactive') {
-                alert('Your administrator account has been deactivated. Please contact Super Admin.');
-                handleLogout();
-                return;
-              }
-              setCurrentAdmin(verified);
-              localStorage.setItem('msf_current_admin', JSON.stringify(verified));
-            }
+            localStorage.setItem('msf_current_admin', JSON.stringify(verified));
+            localStorage.setItem('ms_fitness_admin_session', email);
+          } else {
+            // No authenticated session
+            await handleLogout();
           }
         }
       } catch (err) {
@@ -165,25 +192,35 @@ export default function App() {
     if (supabase) {
       const { data: authListener } = supabase.auth.onAuthStateChange(
         async (event, session) => {
-          if (session?.user?.email) {
-            const email = session.user.email;
+          const email = session?.user?.email?.toLowerCase();
+          if (email) {
+            if (email === 'admin@msfitness.com') {
+              alert('Access Denied: The account "admin@msfitness.com" has been permanently blocked by the Super Administrator.');
+              await handleLogout();
+              return;
+            }
+
+            const verified = await fetchAdminByEmail(email);
+            if (!verified || verified.status === 'inactive') {
+              await supabase.auth.signOut();
+              await handleLogout();
+              return;
+            }
+
+            setCurrentAdmin(verified);
             setAdminEmail(email);
             localStorage.setItem('msf_admin_email', email);
-            const verified = await fetchAdminByEmail(email);
-            if (verified) {
-              if (verified.status === 'inactive') {
-                alert('Your administrator account has been deactivated. Please contact Super Admin.');
-                handleLogout();
-                return;
-              }
-              setCurrentAdmin(verified);
-              localStorage.setItem('msf_current_admin', JSON.stringify(verified));
-            }
+            localStorage.setItem('msf_current_admin', JSON.stringify(verified));
+            localStorage.setItem('ms_fitness_admin_session', email);
           } else if (event === 'SIGNED_OUT') {
             setAdminEmail(null);
             setCurrentAdmin(null);
             localStorage.removeItem('msf_admin_email');
             localStorage.removeItem('msf_current_admin');
+            localStorage.removeItem('ms_fitness_admin_session');
+            localStorage.removeItem('msf_auth_session_email');
+            localStorage.removeItem('msf_auth_member_email');
+            localStorage.removeItem('msf_user_role');
           }
         }
       );
@@ -216,8 +253,11 @@ export default function App() {
         getAdmins(),
       ]);
 
-      if (membersRes.status === 'fulfilled') setMembers(membersRes.value);
-      else console.error('Error fetching members from Supabase:', membersRes.reason);
+      if (membersRes.status === 'fulfilled') {
+        setMembers(membersRes.value);
+      } else {
+        console.error('Error fetching members from Supabase:', membersRes.reason);
+      }
 
       if (plansRes.status === 'fulfilled') setPlans(plansRes.value);
       else console.error('Error fetching plans from Supabase:', plansRes.reason);
@@ -255,34 +295,25 @@ export default function App() {
     }
   }, [adminEmail]);
 
-  // Load data when admin is authenticated
+  // Load data when user is authenticated
   useEffect(() => {
-    if (adminEmail) {
+    if (adminEmail && currentAdmin) {
       loadGymData();
     }
-  }, [adminEmail, loadGymData]);
+  }, [adminEmail, currentAdmin, loadGymData]);
 
-  // Handle Login
-  const handleLoginSuccess = (adminOrEmail: AdminAccount | string) => {
-    if (typeof adminOrEmail === 'string') {
-      setAdminEmail(adminOrEmail);
-      localStorage.setItem('msf_admin_email', adminOrEmail);
-      fetchAdminByEmail(adminOrEmail).then((acc) => {
-        if (acc) {
-          setCurrentAdmin(acc);
-          localStorage.setItem('msf_current_admin', JSON.stringify(acc));
-        }
-      });
-    } else {
-      setAdminEmail(adminOrEmail.email);
-      setCurrentAdmin(adminOrEmail);
-      localStorage.setItem('msf_admin_email', adminOrEmail.email);
-      localStorage.setItem('msf_current_admin', JSON.stringify(adminOrEmail));
-    }
+  // Handle Admin Login Success
+  const handleLoginSuccess = (admin: AdminAccount) => {
+    const email = admin.email.toLowerCase();
+    setAdminEmail(email);
+    setCurrentAdmin(admin);
+    localStorage.setItem('msf_admin_email', email);
+    localStorage.setItem('msf_current_admin', JSON.stringify(admin));
+    localStorage.setItem('ms_fitness_admin_session', email);
     loadGymData();
   };
 
-  // Handle Logout
+  // Handle Logout - Clear All Sessions & Redirect
   const handleLogout = async () => {
     try {
       if (supabase) {
@@ -295,6 +326,10 @@ export default function App() {
       setCurrentAdmin(null);
       localStorage.removeItem('msf_admin_email');
       localStorage.removeItem('msf_current_admin');
+      localStorage.removeItem('ms_fitness_admin_session');
+      localStorage.removeItem('msf_auth_session_email');
+      localStorage.removeItem('msf_auth_member_email');
+      localStorage.removeItem('msf_user_role');
     }
   };
 
@@ -342,8 +377,8 @@ export default function App() {
     const caller: AdminAccount = currentAdmin || {
       id: 'super-admin-root',
       admin_id: 'ADM-0001',
-      full_name: 'Super Administrator',
-      email: adminEmail || 'admin@msfitness.com',
+      full_name: 'Manav Singhal',
+      email: adminEmail || 'singhalmanav58@gmail.com',
       role: 'super_admin',
       status: 'active',
       permissions: ALL_PERMISSIONS.map((p) => p.key),
@@ -360,7 +395,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to register members.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     const nextCode = await generateNextMemberId();
     await createMember({ ...memberData, member_id: nextCode }, userEmail);
     await loadGymData();
@@ -371,7 +406,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to edit member profiles.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     await updateMember(id, updates, userEmail);
     await loadGymData();
   };
@@ -381,7 +416,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to delete member records.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     await deleteMember(id, name, code, userEmail);
     await loadGymData();
   };
@@ -394,7 +429,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to create membership plans.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     await createPlan(planData, userEmail);
     await loadGymData();
   };
@@ -404,7 +439,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to modify membership plans.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     await updatePlan(id, updates, userEmail);
     await loadGymData();
   };
@@ -414,7 +449,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to delete membership plans.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     await deletePlan(id, planName, userEmail);
     await loadGymData();
   };
@@ -424,11 +459,15 @@ export default function App() {
   // ----------------------------------------------------
   const handleRecordPayment = async (payload: {
     member_id: string;
+    original_plan_amount?: number;
+    final_payable?: number;
     amount: number;
     discount: number;
-    previous_balance: number;
-    total_due: number;
-    remaining_balance: number;
+    previous_balance?: number;
+    total_due?: number;
+    remaining_balance?: number;
+    overpaid_amount?: number;
+    payment_status?: any;
     payment_method: 'Cash' | 'UPI';
     transaction_number?: string;
     upi_transaction_number?: string;
@@ -441,33 +480,32 @@ export default function App() {
       alert('Access Denied: You do not have permission to record payments or issue receipts.');
       throw new Error('Access Denied: payments.create');
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     const member = members.find((m) => m.id === payload.member_id);
 
-    const nextPaymentId = await generateNextPaymentId();
-    const nextReceiptNo = await generateNextReceiptNumber();
     const cleanTxn = payload.upi_transaction_number || payload.transaction_number;
 
-    const paymentData: Omit<Payment, 'id'> = {
-      payment_id: nextPaymentId,
-      receipt_number: nextReceiptNo,
+    const paymentPayload = {
       member_id: payload.member_id,
-      member_name: member?.name || 'Member',
-      member_code: member?.member_id || '',
+      original_plan_amount: payload.original_plan_amount,
+      final_payable: payload.final_payable,
       amount: payload.amount,
       discount: payload.discount,
       previous_balance: payload.previous_balance,
       total_due: payload.total_due,
       remaining_balance: payload.remaining_balance,
+      overpaid_amount: payload.overpaid_amount,
+      payment_status: payload.payment_status,
       payment_method: payload.payment_method,
       transaction_number: cleanTxn,
       upi_transaction_number: cleanTxn,
       payment_date: payload.payment_date,
       notes: payload.notes || '',
       plan_name: payload.plan_name || 'Membership Fee',
+      renew_months: payload.renew_months,
     };
 
-    const createdPayment = await createPayment(paymentData, userEmail);
+    const createdPayment = await createPayment(paymentPayload, userEmail);
 
     // If membership renewal is included
     if (payload.renew_months && payload.renew_months > 0 && member) {
@@ -498,7 +536,7 @@ export default function App() {
       alert('Access Denied: You do not have permission to modify gym settings.');
       return;
     }
-    const userEmail = currentAdmin || adminEmail || 'admin@msfitness.com';
+    const userEmail = currentAdmin || adminEmail || 'singhalmanav58@gmail.com';
     await updateSettings(updates, userEmail);
     await loadGymData();
   };
@@ -547,15 +585,14 @@ export default function App() {
     );
   }
 
-  // Not logged in -> Show Login View
-  if (!adminEmail) {
+  // 1. Not logged in as an authorized admin -> Show Login View (Strict Admin Staff OTP Login)
+  if (!adminEmail || !currentAdmin) {
     return (
       <>
         <LoginView
           onLoginSuccess={handleLoginSuccess}
           onOpenConfig={() => setIsConfigModalOpen(true)}
           onOpenSql={() => setIsSqlModalOpen(true)}
-          onOpenBooking={() => setIsBookingModalOpen(true)}
         />
         <AppointmentBookingModal
           isOpen={isBookingModalOpen}
@@ -584,7 +621,7 @@ export default function App() {
     );
   }
 
-  // Find member for viewing receipt modal
+  // 2. Admin Mode -> Find member for viewing receipt modal
   const viewingReceiptMember = viewingReceipt
     ? members.find((m) => m.id === viewingReceipt.member_id || m.member_id === viewingReceipt.member_id || m.member_id === viewingReceipt.member_code)
     : undefined;
@@ -608,7 +645,7 @@ export default function App() {
         {/* Admin Header */}
         <Header
           title={titles[activeTab]}
-          adminEmail={adminEmail}
+          adminEmail={adminEmail || ''}
           currentAdmin={currentAdmin || undefined}
           onLogout={handleLogout}
           onOpenConfig={() => setIsConfigModalOpen(true)}

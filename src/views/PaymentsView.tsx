@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Member, MembershipPlan, Payment, GymSettings, AdminAccount } from '../types';
 import { hasPermission } from '../lib/permissions';
 import { getMemberLatestBalance } from '../lib/db';
+import { calculatePaymentBreakdown, PaymentStatus } from '../lib/paymentCalculations';
 import {
   CreditCard,
   Search,
@@ -134,11 +135,18 @@ export const PaymentsView: React.FC<Props> = ({
     }
   };
 
-  // Payment calculations
-  // Total Payable = Plan Amount - Discount + Previous Balance
-  const totalPayable = Math.max(0, Number(planAmount) - Number(discount) + Number(previousBalance));
-  // Remaining Balance = Total Payable - Amount Paid
-  const remainingBalance = Math.max(0, totalPayable - Number(amountPaid));
+  // Central 100% accurate financial calculation engine
+  const calculation = calculatePaymentBreakdown({
+    originalPlanAmount: planAmount,
+    discount: discount,
+    previousPendingBalance: previousBalance,
+    currentPayment: amountPaid,
+  });
+
+  // Derived financial amounts
+  const totalPayable = calculation.totalOutstandingAmount;
+  const remainingBalance = calculation.remainingPendingAmount;
+  const overpaidAmount = calculation.overpaidAmount;
 
   const handleAmountPaidChange = (valStr: string) => {
     setAmountValidationError(null);
@@ -198,11 +206,15 @@ export const PaymentsView: React.FC<Props> = ({
 
       const payment = await onRecordPayment({
         member_id: selectedMemberId,
-        amount: Number(amountPaid),
-        discount: Number(discount),
-        previous_balance: Number(previousBalance),
-        total_due: Number(totalPayable),
-        remaining_balance: Number(remainingBalance),
+        original_plan_amount: calculation.originalPlanAmount,
+        final_payable: calculation.finalPayableAmount,
+        amount: calculation.currentPayment,
+        discount: calculation.discount,
+        previous_balance: calculation.previousPendingBalance,
+        total_due: calculation.totalOutstandingAmount,
+        remaining_balance: calculation.remainingPendingAmount,
+        overpaid_amount: calculation.overpaidAmount,
+        payment_status: calculation.status,
         payment_method: paymentMethod,
         transaction_number: cleanUpiTxn,
         upi_transaction_number: cleanUpiTxn,
@@ -521,7 +533,7 @@ export const PaymentsView: React.FC<Props> = ({
 
                 <div>
                   <label className="block text-[11px] font-semibold text-amber-400 mb-1 flex items-center justify-between">
-                    <span>Previous Balance (+) (₹)</span>
+                    <span>Previous Pending Balance (+) (₹)</span>
                     {loadingBalance && <span className="text-[10px] text-neutral-400">Loading dues...</span>}
                   </label>
                   <input
@@ -534,18 +546,26 @@ export const PaymentsView: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Total Payable Highlight */}
-              <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-between">
-                <div>
-                  <span className="text-xs font-bold text-white uppercase tracking-wider block">
-                    Total Payable
-                  </span>
-                  <span className="text-[10px] text-neutral-400">
-                    Plan ₹{planAmount} - Discount ₹{discount} + Carried Balance ₹{previousBalance}
+              {/* Explicit Financial Breakdown Highlight */}
+              <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 space-y-2">
+                <div className="flex items-center justify-between text-xs text-neutral-400 pb-2 border-b border-neutral-800/80">
+                  <span>Final Payable (Plan - Discount):</span>
+                  <span className="font-semibold text-white">
+                    ₹{calculation.originalPlanAmount.toLocaleString('en-IN')} - ₹{calculation.discount.toLocaleString('en-IN')} = ₹{calculation.finalPayableAmount.toLocaleString('en-IN')}
                   </span>
                 </div>
-                <div className="text-2xl font-extrabold text-white font-display">
-                  ₹{totalPayable.toLocaleString('en-IN')}
+                <div className="flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-bold text-white uppercase tracking-wider block">
+                      Total Outstanding Due
+                    </span>
+                    <span className="text-[10px] text-neutral-400">
+                      Final Payable (₹{calculation.finalPayableAmount}) + Previous Pending Balance (₹{calculation.previousPendingBalance})
+                    </span>
+                  </div>
+                  <div className="text-2xl font-extrabold text-white font-display">
+                    ₹{calculation.totalOutstandingAmount.toLocaleString('en-IN')}
+                  </div>
                 </div>
               </div>
             </div>
@@ -658,23 +678,69 @@ export const PaymentsView: React.FC<Props> = ({
                 </div>
               )}
 
-              {/* Live Remaining Balance Calculation Box */}
-              <div className="flex items-center justify-between p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 text-xs">
-                <div>
-                  <span className="font-semibold text-neutral-300 block">
-                    Remaining Balance:
-                  </span>
-                  <span className="text-[10px] text-neutral-500">
-                    Automatically carried forward to member's next bill
+              {/* Live Remaining Balance & Overpayment Calculation Box */}
+              <div className="space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className={`p-3.5 rounded-xl border text-xs ${
+                    calculation.remainingPendingAmount > 0
+                      ? 'bg-red-950/40 border-red-800/60 text-red-300'
+                      : 'bg-neutral-900 border-neutral-800 text-neutral-300'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold block text-[11px]">
+                        Remaining Pending Amount:
+                      </span>
+                      <span className={`font-bold font-display text-lg ${
+                        calculation.remainingPendingAmount > 0 ? 'text-red-400' : 'text-emerald-400'
+                      }`}>
+                        ₹{calculation.remainingPendingAmount.toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-neutral-400 mt-0.5 block">
+                      {calculation.remainingPendingAmount > 0
+                        ? "Carried forward to member's next bill"
+                        : 'Nil - No pending balance'}
+                    </span>
+                  </div>
+
+                  <div className={`p-3.5 rounded-xl border text-xs ${
+                    calculation.overpaidAmount > 0
+                      ? 'bg-emerald-950/50 border-emerald-600/70 text-emerald-200'
+                      : 'bg-neutral-900 border-neutral-800 text-neutral-400'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold block text-[11px]">
+                        Overpaid Amount:
+                      </span>
+                      <span className={`font-bold font-display text-lg ${
+                        calculation.overpaidAmount > 0 ? 'text-emerald-400' : 'text-neutral-400'
+                      }`}>
+                        ₹{calculation.overpaidAmount.toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-neutral-400 mt-0.5 block">
+                      {calculation.overpaidAmount > 0
+                        ? 'Credited to member advance balance'
+                        : 'Nil - Exact or partial payment'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Status indicator badge */}
+                <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-neutral-900 border border-neutral-800 text-xs">
+                  <span className="text-neutral-400 text-[11px] font-medium">Payment Status:</span>
+                  <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold uppercase tracking-wider ${
+                    calculation.status === 'Paid'
+                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                      : calculation.status === 'Overpaid'
+                      ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                      : calculation.status === 'Partial'
+                      ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                      : 'bg-red-950 text-red-300 border border-red-800'
+                  }`}>
+                    {calculation.status === 'Overpaid' ? 'Overpaid (Advance Credit)' : calculation.status}
                   </span>
                 </div>
-                <span
-                  className={`font-bold font-display text-lg ${
-                    remainingBalance > 0 ? 'text-red-400' : 'text-emerald-400'
-                  }`}
-                >
-                  ₹{remainingBalance.toLocaleString('en-IN')}
-                </span>
               </div>
 
               {/* Payment Date, Renew Months, and Receipt Notes */}
@@ -766,7 +832,7 @@ export const PaymentsView: React.FC<Props> = ({
                 </p>
               </div>
 
-              <div className="bg-neutral-950 rounded-2xl p-4 border border-neutral-800 text-xs space-y-2.5">
+              <div className="bg-neutral-950 rounded-2xl p-4 border border-neutral-800 text-xs space-y-2">
                 <div className="flex justify-between">
                   <span className="text-neutral-400">Receipt No:</span>
                   <span className="font-mono font-bold text-red-400">
@@ -774,15 +840,59 @@ export const PaymentsView: React.FC<Props> = ({
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-neutral-400">Amount Paid:</span>
+                  <span className="text-neutral-400">Plan Amount:</span>
+                  <span className="font-semibold text-white">
+                    ₹{Number(successPayment.original_plan_amount ?? successPayment.total_due).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                {Number(successPayment.discount || 0) > 0 && (
+                  <div className="flex justify-between text-red-400">
+                    <span>Discount:</span>
+                    <span>- ₹{Number(successPayment.discount).toLocaleString('en-IN')}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-neutral-300">
+                  <span>Final Payable:</span>
+                  <span className="font-semibold text-white">
+                    ₹{Number(successPayment.final_payable ?? (Number(successPayment.total_due) - Number(successPayment.previous_balance || 0))).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                {Number(successPayment.previous_balance || 0) > 0 && (
+                  <div className="flex justify-between text-amber-400">
+                    <span>Previous Balance:</span>
+                    <span>+ ₹{Number(successPayment.previous_balance).toLocaleString('en-IN')}</span>
+                  </div>
+                )}
+                <div className="flex justify-between border-t border-neutral-800 pt-1.5">
+                  <span className="text-neutral-300 font-medium">Total Due:</span>
+                  <span className="font-bold text-white">
+                    ₹{Number(successPayment.total_due).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-300 font-medium">Current Payment:</span>
                   <span className="font-bold text-emerald-400 text-sm">
                     ₹{Number(successPayment.amount).toLocaleString('en-IN')}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-neutral-400">Remaining Balance:</span>
-                  <span className="font-bold text-amber-400">
+                  <span className="text-neutral-300 font-medium">Remaining Pending:</span>
+                  <span className={`font-bold ${Number(successPayment.remaining_balance) > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
                     ₹{Number(successPayment.remaining_balance).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                {Number(successPayment.overpaid_amount || 0) > 0 && (
+                  <div className="flex justify-between bg-emerald-950/40 p-1.5 rounded-lg border border-emerald-800/40 text-emerald-300">
+                    <span className="font-semibold">Overpaid / Advance Credit:</span>
+                    <span className="font-bold">
+                      + ₹{Number(successPayment.overpaid_amount).toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                )}
+                <div className="flex justify-between items-center pt-1 border-t border-neutral-850">
+                  <span className="text-neutral-400">Status:</span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider bg-neutral-800 text-white border border-neutral-700">
+                    {successPayment.payment_status || 'Paid'}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -860,45 +970,83 @@ export const PaymentsView: React.FC<Props> = ({
 
                 <div className="space-y-2 text-neutral-300">
                   <div className="flex justify-between">
-                    <span className="text-neutral-400">Plan Amount:</span>
-                    <span className="font-semibold text-white">₹{planAmount.toLocaleString('en-IN')}</span>
+                    <span className="text-neutral-400">Original Plan Amount:</span>
+                    <span className="font-semibold text-white">₹{calculation.originalPlanAmount.toLocaleString('en-IN')}</span>
                   </div>
-                  <div className="flex justify-between text-red-400">
-                    <span>Discount (-):</span>
-                    <span>- ₹{discount.toLocaleString('en-IN')}</span>
+                  {calculation.discount > 0 && (
+                    <div className="flex justify-between text-red-400">
+                      <span>Discount (-):</span>
+                      <span>- ₹{calculation.discount.toLocaleString('en-IN')}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between text-neutral-300">
+                    <span>Final Payable Amount:</span>
+                    <span className="font-bold text-white">₹{calculation.finalPayableAmount.toLocaleString('en-IN')}</span>
                   </div>
-                  <div className="flex justify-between text-amber-400">
-                    <span>Previous Balance (+):</span>
-                    <span>+ ₹{previousBalance.toLocaleString('en-IN')}</span>
-                  </div>
+                  {calculation.previousPendingBalance > 0 && (
+                    <div className="flex justify-between text-amber-400">
+                      <span>Previous Pending Balance (+):</span>
+                      <span>+ ₹{calculation.previousPendingBalance.toLocaleString('en-IN')}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between font-bold text-white pt-2 border-t border-neutral-800 text-sm">
-                    <span>Total Payable:</span>
-                    <span>₹{totalPayable.toLocaleString('en-IN')}</span>
+                    <span>Total Outstanding Due:</span>
+                    <span className="text-red-300">₹{calculation.totalOutstandingAmount.toLocaleString('en-IN')}</span>
                   </div>
                 </div>
 
                 <div className="pt-3 border-t border-neutral-800 grid grid-cols-2 gap-2 text-center">
                   <div className="bg-emerald-950/40 p-2.5 rounded-xl border border-emerald-800/40">
                     <span className="text-[10px] text-emerald-400 uppercase font-semibold block">
-                      Amount Paid
+                      Current Payment
                     </span>
                     <span className="text-base font-bold text-emerald-300 font-display">
-                      ₹{amountPaid.toLocaleString('en-IN')}
+                      ₹{calculation.currentPayment.toLocaleString('en-IN')}
                     </span>
                   </div>
-                  <div className="bg-neutral-900 p-2.5 rounded-xl border border-neutral-800">
+                  <div className={`p-2.5 rounded-xl border ${
+                    calculation.remainingPendingAmount > 0
+                      ? 'bg-neutral-900 border-neutral-800'
+                      : 'bg-emerald-950/30 border-emerald-900/40'
+                  }`}>
                     <span className="text-[10px] text-neutral-400 uppercase font-semibold block">
-                      Remaining Balance
+                      Remaining Pending
                     </span>
-                    <span className="text-base font-bold text-red-400 font-display">
-                      ₹{remainingBalance.toLocaleString('en-IN')}
+                    <span className={`text-base font-bold font-display ${
+                      calculation.remainingPendingAmount > 0 ? 'text-red-400' : 'text-emerald-400'
+                    }`}>
+                      ₹{calculation.remainingPendingAmount.toLocaleString('en-IN')}
                     </span>
                   </div>
+                </div>
+
+                {calculation.overpaidAmount > 0 && (
+                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-emerald-950/60 border border-emerald-600/60 text-xs text-emerald-300">
+                    <span className="font-semibold">Overpaid Advance Credit:</span>
+                    <span className="font-bold text-sm text-emerald-200">
+                      + ₹{calculation.overpaidAmount.toLocaleString('en-IN')}
+                    </span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between px-3 py-1.5 rounded-xl bg-neutral-900 border border-neutral-800 text-xs">
+                  <span className="text-neutral-400 text-[10px]">Payment Status:</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider ${
+                    calculation.status === 'Paid'
+                      ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                      : calculation.status === 'Overpaid'
+                      ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                      : calculation.status === 'Partial'
+                      ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                      : 'bg-red-950 text-red-300 border border-red-800'
+                  }`}>
+                    {calculation.status === 'Overpaid' ? 'Overpaid (Credit)' : calculation.status}
+                  </span>
                 </div>
               </div>
 
               <div className="p-3.5 rounded-xl bg-neutral-950/60 border border-neutral-800/80 text-[11px] text-neutral-400 leading-relaxed">
-                💡 <strong>Ledger Accounting Rule:</strong> If a member pays less than the Total Payable, the Remaining Balance is automatically carried over to their next fee cycle as a previous due.
+                💡 <strong>100% Ledger Precision:</strong> If a member pays more than due (e.g. ₹9,004 for ₹8,999), the remaining pending is ₹0 and the extra ₹5 is stored as Overpaid Advance Credit. If less is paid, remaining pending carries to their next cycle.
               </div>
             </div>
           )}
@@ -971,6 +1119,8 @@ export const PaymentsView: React.FC<Props> = ({
                   <th className="py-3.5 px-4">Total Due</th>
                   <th className="py-3.5 px-4">Amount Paid</th>
                   <th className="py-3.5 px-4">Remaining Due</th>
+                  <th className="py-3.5 px-4">Overpaid Credit</th>
+                  <th className="py-3.5 px-4">Status</th>
                   <th className="py-3.5 px-4">Method / UPI Txn</th>
                   <th className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
@@ -990,6 +1140,9 @@ export const PaymentsView: React.FC<Props> = ({
                     extractUpiTransactionNumber(p.notes);
                   const planResolved = resolveMemberPlanName(member, plans, p);
                   const isUpi = p.payment_method === 'UPI';
+                  const overpaid = Number(p.overpaid_amount || 0);
+                  const remDue = Number(p.remaining_balance || 0);
+                  const status = p.payment_status || (remDue === 0 ? (overpaid > 0 ? 'Overpaid' : 'Paid') : (Number(p.amount) > 0 ? 'Partial' : 'Pending'));
 
                   return (
                     <tr key={p.id} className="hover:bg-neutral-800/40 transition-colors">
@@ -1031,8 +1184,34 @@ export const PaymentsView: React.FC<Props> = ({
                       <td className="py-3.5 px-4 font-bold text-emerald-400 font-mono">
                         ₹{Number(p.amount).toLocaleString('en-IN')}
                       </td>
-                      <td className="py-3.5 px-4 font-semibold text-red-400 font-mono">
-                        ₹{Number(p.remaining_balance).toLocaleString('en-IN')}
+                      <td className="py-3.5 px-4 font-semibold font-mono">
+                        <span className={remDue > 0 ? 'text-red-400' : 'text-emerald-400'}>
+                          ₹{remDue.toLocaleString('en-IN')}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 font-semibold font-mono">
+                        {overpaid > 0 ? (
+                          <span className="text-emerald-400 font-bold bg-emerald-950/50 px-2 py-0.5 rounded border border-emerald-800/40">
+                            +₹{overpaid.toLocaleString('en-IN')}
+                          </span>
+                        ) : (
+                          <span className="text-neutral-500">₹0</span>
+                        )}
+                      </td>
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                            status === 'Paid'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/50'
+                              : status === 'Overpaid'
+                              ? 'bg-blue-950 text-blue-300 border border-blue-800/50'
+                              : status === 'Partial'
+                              ? 'bg-amber-950 text-amber-300 border border-amber-800/50'
+                              : 'bg-red-950 text-red-300 border border-red-800/50'
+                          }`}
+                        >
+                          {status}
+                        </span>
                       </td>
                       <td className="py-3.5 px-4">
                         <span

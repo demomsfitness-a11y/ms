@@ -20,6 +20,8 @@ export interface Member {
   updated_at?: string;
   // Computed or cached financial stats for the member
   remaining_balance?: number;
+  overpaid_balance?: number;
+  payment_status?: 'Paid' | 'Partial' | 'Overpaid' | 'Pending' | 'Unpaid';
 }
 
 export interface MembershipPlan {
@@ -39,11 +41,15 @@ export interface Payment {
   payment_id: string; // e.g. MSF-FEE-260905-0001
   receipt_number?: string; // e.g. MSF-RCPT-260905-001
   member_id: string;
+  original_plan_amount?: number;
+  final_payable?: number;
   amount: number;
   discount: number;
   previous_balance: number;
   total_due: number;
   remaining_balance: number;
+  overpaid_amount?: number;
+  payment_status?: 'Paid' | 'Partial' | 'Overpaid' | 'Pending' | 'Unpaid';
   payment_method: 'Cash' | 'UPI';
   transaction_number?: string;
   upi_transaction_number?: string;
@@ -227,6 +233,7 @@ export interface DashboardStats {
   todayCollection: number;
   thisMonthCollection: number;
   totalOutstandingBalance: number;
+  totalOverpaidCredit: number;
 }
 
 export type AppointmentServiceType =

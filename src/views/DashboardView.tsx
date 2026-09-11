@@ -13,7 +13,8 @@ import {
   ArrowRight,
   Plus,
   Eye,
-  FileText
+  FileText,
+  Sparkles
 } from 'lucide-react';
 
 interface Props {
@@ -56,6 +57,7 @@ export const DashboardView: React.FC<Props> = ({
     todayCollection: 0,
     thisMonthCollection: 0,
     totalOutstandingBalance: 0,
+    totalOverpaidCredit: 0,
   };
 
   const stats: DashboardStats =
@@ -171,8 +173,8 @@ export const DashboardView: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Primary KPI Grid (8 Key Metrics) */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {/* Primary KPI Grid (Key Metrics) */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
         {/* Metric 1: Total Members */}
         <div
           onClick={() => onNavigate('members')}
@@ -306,7 +308,26 @@ export const DashboardView: React.FC<Props> = ({
           </span>
         </div>
 
-        {/* Metric 8: Total Payments Count */}
+        {/* Metric 8: Advance / Overpaid Credit */}
+        <div
+          onClick={() => onNavigate('payments')}
+          className="bg-neutral-900/90 border border-neutral-800 hover:border-emerald-800/60 rounded-2xl p-5 cursor-pointer transition-all hover:bg-neutral-900"
+        >
+          <div className="flex items-center justify-between text-neutral-400 text-xs font-semibold uppercase tracking-wider">
+            <span>Advance / Overpaid</span>
+            <div className="w-8 h-8 rounded-xl bg-emerald-950/60 border border-emerald-800/40 flex items-center justify-center text-emerald-400">
+              <Sparkles className="w-4 h-4" />
+            </div>
+          </div>
+          <p className="text-3xl md:text-4xl font-bold text-emerald-400 mt-3 font-display">
+            ₹{(stats?.totalOverpaidCredit ?? 0).toLocaleString('en-IN')}
+          </p>
+          <span className="text-[11px] text-neutral-400 mt-1 block">
+            Member credit balances
+          </span>
+        </div>
+
+        {/* Metric 9: Total Payments Count */}
         <div
           onClick={() => onNavigate('payments')}
           className="bg-neutral-900/90 border border-neutral-800 hover:border-neutral-700 rounded-2xl p-5 cursor-pointer transition-all hover:bg-neutral-900"
