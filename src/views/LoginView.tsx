@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { isSupabaseConfigured } from '../lib/supabase';
-import { validateEmail, sendSupabaseEmailOtp, verifySupabaseEmailOtp, signOutSupabase } from '../lib/auth';
+import {
+  validateEmail,
+  sendSupabaseEmailOtp,
+  verifySupabaseEmailOtp,
+  signOutSupabase,
+  AuthRateLimitError,
+  getRemainingOtpCooldown,
+  recordOtpSent,
+} from '../lib/auth';
 import { fetchAdminByEmail, updateAdminLastLogin, logActivity } from '../lib/db';
 import { AdminAccount } from '../types';
 import {
@@ -30,7 +38,9 @@ export const LoginView: React.FC<Props> = ({
   onOpenConfig,
   onOpenSql,
 }) => {
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(() => {
+    return localStorage.getItem('msf_pending_otp_email') || '';
+  });
   const [otp, setOtp] = useState('');
   const [step, setStep] = useState<'email' | 'otp'>('email');
 
@@ -42,36 +52,55 @@ export const LoginView: React.FC<Props> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
-  // 30-second Resend countdown timer
-  const [resendCountdown, setResendCountdown] = useState<number>(30);
+  // 60-second Resend cooldown timer in sync with Supabase Auth rate limits
+  const [resendCountdown, setResendCountdown] = useState<number>(0);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   const isConfigured = isSupabaseConfigured();
 
-  // Manage 30-second countdown when in OTP verification step
+  // Helper to start or resume countdown timer
+  const startTimer = (initialSeconds: number) => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    setResendCountdown(initialSeconds);
+
+    timerRef.current = setInterval(() => {
+      setResendCountdown((prev) => {
+        if (prev <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          timerRef.current = null;
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
+
+  // Check pending session or active cooldown on initial mount
   useEffect(() => {
-    if (step === 'otp') {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setResendCountdown(30);
-      timerRef.current = setInterval(() => {
-        setResendCountdown((prev) => {
-          if (prev <= 1) {
-            if (timerRef.current) clearInterval(timerRef.current);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
+    const savedEmail = localStorage.getItem('msf_pending_otp_email');
+    if (savedEmail) {
+      const remaining = getRemainingOtpCooldown(savedEmail);
+      if (remaining > 0) {
+        setEmail(savedEmail);
+        startTimer(remaining);
       }
     }
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
+  }, []);
+
+  // Update timer whenever step changes to 'otp'
+  useEffect(() => {
+    if (step === 'otp') {
+      const remaining = getRemainingOtpCooldown(email);
+      if (remaining > 0) {
+        startTimer(remaining);
+      } else if (resendCountdown === 0) {
+        startTimer(60);
+      }
+    }
   }, [step]);
 
   // Step 1: Send Real Email OTP through Supabase Authentication
@@ -100,6 +129,18 @@ export const LoginView: React.FC<Props> = ({
       return;
     }
 
+    // Check if client is still within the 60-second rate-limit window
+    const activeCooldown = getRemainingOtpCooldown(cleanEmail);
+    if (activeCooldown > 0) {
+      // Avoid triggering Supabase 429 HTTP error; transition user smoothly to enter code!
+      startTimer(activeCooldown);
+      setStep('otp');
+      setInfoMsg(
+        `A verification code was already dispatched to ${cleanEmail}. Please check your inbox or spam folder. You can resend in ${activeCooldown}s.`
+      );
+      return;
+    }
+
     setIsSendingOtp(true);
 
     try {
@@ -107,19 +148,35 @@ export const LoginView: React.FC<Props> = ({
       await sendSupabaseEmailOtp(cleanEmail);
 
       // Transition to OTP verification step
+      startTimer(60);
       setStep('otp');
       setOtp('');
-      setInfoMsg('OTP sent successfully. Check your email.');
+      setInfoMsg('OTP sent successfully. Check your email inbox or spam folder.');
     } catch (err: any) {
-      console.error('Send OTP failed:', err);
+      console.warn('Send OTP result:', err);
       const message = err.message || 'Unable to send OTP. Please try again.';
-      setErrorMsg(message);
+
+      if (
+        err instanceof AuthRateLimitError ||
+        message.includes('Too many') ||
+        message.includes('rate limit') ||
+        message.includes('security purposes')
+      ) {
+        const secs = (err as any).seconds || 60;
+        recordOtpSent(cleanEmail, secs);
+        startTimer(secs);
+        setErrorMsg(
+          `Too many OTP requests. Supabase allows 1 email request every ${secs}s. If you already received a code in your email, click "Enter Code" below.`
+        );
+      } else {
+        setErrorMsg(message);
+      }
     } finally {
       setIsSendingOtp(false);
     }
   };
 
-  // Resend OTP handler with 30-second countdown reset
+  // Resend OTP handler with 60-second countdown reset
   const handleResendOtp = async () => {
     if (resendCountdown > 0 || isSendingOtp || isVerifyingOtp) return;
 
@@ -132,27 +189,37 @@ export const LoginView: React.FC<Props> = ({
       return;
     }
 
+    const cleanEmail = validation.normalized;
+    const activeCooldown = getRemainingOtpCooldown(cleanEmail);
+    if (activeCooldown > 0) {
+      startTimer(activeCooldown);
+      setErrorMsg(`Please wait ${activeCooldown} more seconds before requesting another code.`);
+      return;
+    }
+
     setIsSendingOtp(true);
 
     try {
-      await sendSupabaseEmailOtp(validation.normalized);
-      setInfoMsg('OTP sent successfully. Check your email.');
-
-      // Reset 30s countdown
-      setResendCountdown(30);
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        setResendCountdown((prev) => {
-          if (prev <= 1) {
-            if (timerRef.current) clearInterval(timerRef.current);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
+      await sendSupabaseEmailOtp(cleanEmail);
+      setInfoMsg('A fresh verification code was sent to your email.');
+      startTimer(60);
     } catch (err: any) {
-      console.error('Resend OTP error:', err);
-      setErrorMsg(err.message || 'Unable to send OTP. Please try again.');
+      console.warn('Resend OTP notice:', err);
+      const message = err.message || 'Unable to send OTP. Please try again.';
+
+      if (
+        err instanceof AuthRateLimitError ||
+        message.includes('Too many') ||
+        message.includes('rate limit') ||
+        message.includes('security purposes')
+      ) {
+        const secs = (err as any).seconds || 60;
+        recordOtpSent(cleanEmail, secs);
+        startTimer(secs);
+        setErrorMsg(`Rate limit active: Please wait ${secs} seconds before requesting a new code.`);
+      } else {
+        setErrorMsg(message);
+      }
     } finally {
       setIsSendingOtp(false);
     }
@@ -218,6 +285,9 @@ export const LoginView: React.FC<Props> = ({
         setIsVerifyingOtp(false);
         return;
       }
+
+      // Clear pending OTP tracking on successful login
+      localStorage.removeItem('msf_pending_otp_email');
 
       // 3. Authorized Admin/Staff access granted!
       localStorage.setItem('ms_fitness_admin_session', adminRecord.email);
@@ -302,9 +372,28 @@ export const LoginView: React.FC<Props> = ({
 
         {/* Error notification */}
         {errorMsg && (
-          <div className="mb-6 p-3.5 rounded-2xl bg-red-950/60 border border-red-800/70 text-red-200 text-xs flex items-start gap-2.5 animate-in fade-in duration-150">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-            <p className="leading-relaxed">{errorMsg}</p>
+          <div className="mb-6 p-3.5 rounded-2xl bg-red-950/60 border border-red-800/70 text-red-200 text-xs space-y-2.5 animate-in fade-in duration-150">
+            <div className="flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+              <p className="leading-relaxed">{errorMsg}</p>
+            </div>
+
+            {/* Quick resolution if user is blocked on email screen by rate limiting */}
+            {step === 'email' && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStep('otp');
+                    setErrorMsg(null);
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-red-600/30 hover:bg-red-600/50 border border-red-500/40 text-white font-semibold text-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-red-400" />
+                  <span>Enter Code Received in Email</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
 
@@ -313,6 +402,28 @@ export const LoginView: React.FC<Props> = ({
           <div className="mb-6 p-3.5 rounded-2xl bg-emerald-950/40 border border-emerald-800/60 text-emerald-200 text-xs flex items-start gap-2.5 animate-in fade-in duration-150">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
             <p className="leading-relaxed">{infoMsg}</p>
+          </div>
+        )}
+
+        {/* Active Cooldown Banner on Email screen */}
+        {step === 'email' && resendCountdown > 0 && (
+          <div className="mb-6 p-3 rounded-2xl bg-neutral-950 border border-neutral-800 text-xs flex items-center justify-between text-neutral-400">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-amber-400 animate-pulse" />
+              <span>
+                Rate limit cooldown: <strong>{resendCountdown}s</strong>
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setStep('otp');
+                setErrorMsg(null);
+              }}
+              className="text-red-400 hover:text-red-300 font-semibold underline text-xs cursor-pointer"
+            >
+              Enter Code &rarr;
+            </button>
           </div>
         )}
 
@@ -354,6 +465,26 @@ export const LoginView: React.FC<Props> = ({
                 </>
               )}
             </button>
+
+            {/* Direct transition if code was already received */}
+            <div className="pt-2 text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  const validation = validateEmail(email);
+                  if (!validation.valid) {
+                    setErrorMsg('Please enter your email address first.');
+                    return;
+                  }
+                  setErrorMsg(null);
+                  setStep('otp');
+                }}
+                className="text-xs text-neutral-400 hover:text-white transition-colors cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-red-500" />
+                <span>Already received an OTP code? <strong>Enter Code</strong></span>
+              </button>
+            </div>
           </form>
         ) : (
           /* STEP 2: Enter 6-digit OTP Verification Code */
@@ -422,7 +553,7 @@ export const LoginView: React.FC<Props> = ({
               )}
             </button>
 
-            {/* Resend OTP Section with 30s Countdown */}
+            {/* Resend OTP Section with 60s Countdown */}
             <div className="pt-2 text-center space-y-1">
               <p className="text-xs text-neutral-400">Didn't receive the code?</p>
               {resendCountdown > 0 ? (
@@ -449,20 +580,23 @@ export const LoginView: React.FC<Props> = ({
         <div className="mt-8 pt-4 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-500">
           <button
             type="button"
-            onClick={onOpenConfig}
-            className="hover:text-red-400 flex items-center gap-1.5 transition-colors cursor-pointer"
+            onClick={onOpenSql}
+            className="flex items-center gap-1 text-neutral-400 hover:text-white transition-colors cursor-pointer"
           >
-            <Database className="w-3.5 h-3.5" /> Supabase Config
+            <FileCode className="w-3.5 h-3.5 text-red-500" />
+            <span>Email OTP Template Setup</span>
           </button>
           <button
             type="button"
-            onClick={onOpenSql}
-            className="hover:text-red-400 flex items-center gap-1.5 transition-colors cursor-pointer"
+            onClick={onOpenConfig}
+            className="flex items-center gap-1 text-neutral-400 hover:text-white transition-colors cursor-pointer"
           >
-            <FileCode className="w-3.5 h-3.5" /> SQL & Email OTP Setup
+            <Database className="w-3.5 h-3.5 text-red-500" />
+            <span>Supabase Config</span>
           </button>
         </div>
       </div>
     </div>
   );
 };
+

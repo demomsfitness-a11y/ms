@@ -7,6 +7,53 @@ export interface EmailValidationResult {
   error?: string;
 }
 
+export class AuthRateLimitError extends Error {
+  seconds: number;
+  constructor(message: string, seconds: number = 60) {
+    super(message);
+    this.name = 'AuthRateLimitError';
+    this.seconds = seconds;
+  }
+}
+
+const OTP_COOLDOWN_SECONDS = 60;
+
+/**
+ * Returns remaining cooldown seconds for an email (0 if ready to send).
+ */
+export function getRemainingOtpCooldown(email: string): number {
+  if (typeof window === 'undefined' || !window.localStorage) return 0;
+  try {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail) return 0;
+    const stored = localStorage.getItem(`msf_otp_last_sent_${cleanEmail}`);
+    if (!stored) return 0;
+    const lastSent = Number(stored);
+    if (!lastSent || isNaN(lastSent)) return 0;
+    const elapsed = Math.floor((Date.now() - lastSent) / 1000);
+    if (elapsed < 0) return 0;
+    const remaining = OTP_COOLDOWN_SECONDS - elapsed;
+    return remaining > 0 ? remaining : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Records an OTP send event with current timestamp.
+ */
+export function recordOtpSent(email: string, seconds: number = OTP_COOLDOWN_SECONDS): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail) return;
+    localStorage.setItem(`msf_otp_last_sent_${cleanEmail}`, String(Date.now()));
+    localStorage.setItem('msf_pending_otp_email', cleanEmail);
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
 /**
  * Validates and normalizes email address.
  * - Trims unnecessary whitespace.
@@ -63,7 +110,9 @@ export function mapSupabaseAuthError(error: any, context: 'send' | 'verify'): st
     msg.includes('seconds') ||
     status === 429
   ) {
-    return 'Too many OTP requests. Please wait and try again.';
+    const match = msg.match(/(\d+)\s*seconds/i);
+    const secs = match && match[1] ? parseInt(match[1], 10) : 60;
+    return `Too many OTP requests. Supabase rate limits requests to once every ${secs} seconds. Please wait or enter the code already sent to your email.`;
   }
 
   // Network / connectivity issues
@@ -141,16 +190,47 @@ export async function sendSupabaseEmailOtp(email: string): Promise<{ success: bo
 
     if (error) {
       console.warn('Supabase signInWithOtp error:', error);
+      const msg = String(error.message || (error as any).error_description || error || '').toLowerCase();
+      const status = error.status || (error as any).statusCode;
+
+      if (
+        msg.includes('rate limit') ||
+        msg.includes('too many') ||
+        msg.includes('over_email_send_rate_limit') ||
+        msg.includes('security purposes') ||
+        msg.includes('seconds') ||
+        status === 429
+      ) {
+        const match = msg.match(/(\d+)\s*seconds/i);
+        const secs = match && match[1] ? parseInt(match[1], 10) : 60;
+        recordOtpSent(validation.normalized, secs);
+        throw new AuthRateLimitError(
+          `Too many OTP requests. Supabase limits requests to once every ${secs} seconds. Please wait or enter the code already sent to your email.`,
+          secs
+        );
+      }
+
       const friendlyMsg = mapSupabaseAuthError(error, 'send');
       throw new Error(friendlyMsg);
     }
+
+    recordOtpSent(validation.normalized, 60);
 
     return {
       success: true,
       message: 'OTP sent successfully. Check your email.',
     };
   } catch (err: any) {
-    if (err.message && (err.message.startsWith('Please') || err.message.startsWith('Too many') || err.message.startsWith('Connection') || err.message.startsWith('Unable'))) {
+    if (err instanceof AuthRateLimitError) {
+      throw err;
+    }
+    if (
+      err.message &&
+      (err.message.startsWith('Please') ||
+        err.message.startsWith('Too many') ||
+        err.message.startsWith('Connection') ||
+        err.message.startsWith('Unable'))
+    ) {
       throw err;
     }
     const friendlyMsg = mapSupabaseAuthError(err, 'send');
